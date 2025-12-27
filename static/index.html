@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>自然科学基金申请书智能助手</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Markdown 渲染库 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📝 自然科学基金申请书智能助手</h1>
+        </header>
+
+        <div class="main-layout">
+            <!-- 左侧导航栏 -->
+            <nav class="sidebar-nav">
+                <div class="nav-header">
+                    <h2>导航菜单</h2>
+                </div>
+                <ul class="nav-menu">
+                    <li>
+                        <a href="#page-key-content" class="nav-item active" data-page="key-content">
+                            <span class="nav-icon">🔧</span>
+                            <span class="nav-text">关键内容设置</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#page-prompt" class="nav-item" data-page="prompt">
+                            <span class="nav-icon">📋</span>
+                            <span class="nav-text">Prompt 设置</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#page-chat" class="nav-item" data-page="chat">
+                            <span class="nav-icon">💬</span>
+                            <span class="nav-text">对话与微调</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#page-settings" class="nav-item" data-page="settings">
+                            <span class="nav-icon">⚙️</span>
+                            <span class="nav-text">设置</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+
+            <!-- 主内容区域 -->
+            <main class="main-content-wrapper">
+                    <!-- 登录页面 -->
+                    <div id="page-login" class="page active">
+                        <div class="auth-container">
+                            <div class="auth-box">
+                                <h2>🔐 用户登录</h2>
+                                <p class="auth-subtitle">欢迎回来！请登录您的账号</p>
+                                
+                                <div class="form-group">
+                                    <label for="login-username">用户名</label>
+                                    <input type="text" id="login-username" class="form-input" placeholder="请输入用户名/邮箱" autocomplete="off" value="" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="login-password">密码</label>
+                                    <input type="password" id="login-password" class="form-input" placeholder="请输入密码" autocomplete="off" value="" required>
+                                </div>
+                                <button id="login-btn" class="btn btn-primary btn-block">登录</button>
+                                <div id="login-error" class="error-message" style="display: none;"></div>
+                                
+                                <div class="auth-footer">
+                                    <p>还没有账号？<a href="#" id="go-to-register">立即注册</a></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                <!-- 注册页面 -->
+                <div id="page-register" class="page">
+                    <div class="auth-container">
+                        <div class="auth-box">
+                            <h2>📝 用户注册</h2>
+                            <p class="auth-subtitle">创建新账号，开始使用智能助手</p>
+                            
+                            <div class="form-group">
+                                <label for="register-username">用户名</label>
+                                <input type="text" id="register-username" class="form-input" placeholder="请输入用户名" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="register-password">密码</label>
+                                <input type="password" id="register-password" class="form-input" placeholder="请输入密码（至少6位）" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="register-email">邮箱（可选）</label>
+                                <input type="email" id="register-email" class="form-input" placeholder="请输入邮箱（可选）">
+                            </div>
+                            <button id="register-btn" class="btn btn-primary btn-block">注册</button>
+                            <div id="register-error" class="error-message" style="display: none;"></div>
+                            
+                            <div class="auth-footer">
+                                <p>已有账号？<a href="#" id="go-to-login">立即登录</a></p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 页面1：关键内容设置界面 -->
+                <div id="page-key-content" class="page">
+                    <div class="page-header">
+                        <h2>🔧 关键内容设置界面</h2>
+                        <p class="page-description">在此页面填写和保存您的关键内容变量</p>
+                    </div>
+                    <div class="page-content">
+                        <div class="key-content-form">
+                            <div class="auto-save-hint">
+                                <small style="color: #4caf50;">💡 内容会自动保存，无需手动点击保存按钮</small>
+                            </div>
+                            <div id="key-content-inputs"></div>
+                            <button id="add-key-content-item" class="btn btn-secondary">➕ 添加条目</button>
+                            <button id="save-key-content" class="btn btn-primary" style="margin-top: 10px;">💾 立即保存关键内容（可选）</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 页面2：Prompt 设置界面 -->
+                <div id="page-prompt" class="page">
+                    <div class="page-header">
+                        <h2>📋 Prompt 设置界面</h2>
+                        <p class="page-description">在此页面创建和管理 Prompt 模板，每个模板可以引用第一个页面中的关键内容条目</p>
+                    </div>
+                    <div class="page-content">
+                        <div class="key-content-form">
+                            <div class="auto-save-hint">
+                                <small style="color: #4caf50;">💡 内容会自动保存，无需手动点击保存按钮</small>
+                            </div>
+                            <div id="prompt-inputs"></div>
+                            <button id="add-prompt-item" class="btn btn-secondary">➕ 添加 Prompt 模板</button>
+                            <button id="save-prompts" class="btn btn-primary" style="margin-top: 10px;">💾 立即保存 Prompt 模板（可选）</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 页面3：对话与微调区域 -->
+                <div id="page-chat" class="page">
+                    <div class="page-header">
+                        <h2>💬 对话与微调区域</h2>
+                        <p class="page-description">选择 Prompt 发送给大模型，并可以进行后续交流</p>
+                    </div>
+                    <div class="page-content">
+                        <div class="chat-layout">
+                            <!-- 左侧：对话管理和 Prompt 选择 -->
+                            <div class="chat-left">
+                                <div class="conversation-section">
+                                    <h3>对话管理</h3>
+                                    <button id="new-conversation" class="btn btn-secondary">➕ 新建对话</button>
+                                </div>
+
+                                <div class="conversation-section">
+                                    <h3>对话框列表</h3>
+                                    <select id="conversation-selector" class="select-input"></select>
+                                    <input type="text" id="conversation-name" class="text-input" placeholder="对话框名称" style="margin-top: 10px;">
+                                </div>
+
+                                <div class="conversation-section">
+                                    <h3>选择 Prompt</h3>
+                                    <select id="chat-prompt-selector" class="select-input">
+                                        <option value="">请选择要使用的 Prompt</option>
+                                    </select>
+                                    <button id="send-prompt-btn" class="btn btn-primary" style="margin-top: 10px; width: 100%;">🚀 发送 Prompt 给大模型</button>
+                                </div>
+                            </div>
+
+                            <!-- 右侧：对话内容 -->
+                            <div class="chat-right">
+                                <div class="content-section">
+                                    <h3>展示一开始输入的文本</h3>
+                                    <textarea id="key-content-display" class="text-area" readonly></textarea>
+                                </div>
+
+                                <div class="content-section">
+                                    <h3>对话内容</h3>
+                                    <div id="messages-container" class="messages-container">
+                                        <div class="info-message">👈 请先创建一个对话，选择一个 Prompt，然后点击「发送 Prompt 给大模型」开始</div>
+                                    </div>
+                                </div>
+
+                                <div class="content-section">
+                                    <h3>输入框</h3>
+                                    <div class="chat-input-container">
+                                        <textarea id="chat-input" class="chat-input" placeholder="输入指令进行修改或继续对话..."></textarea>
+                                        <button id="send-btn" class="btn btn-primary">发送</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 页面4：设置界面 -->
+                <div id="page-settings" class="page">
+                    <div class="page-header">
+                        <h2>⚙️ 设置</h2>
+                        <p class="page-description">配置 LLM API 参数，支持 DeepSeek、OpenAI、Gemini、Claude 等兼容 OpenAI API 的模型</p>
+                    </div>
+                    <div class="page-content">
+                        <div class="settings-form">
+                            <div class="settings-section">
+                                <h3>LLM API 配置</h3>
+                                
+                                <div class="settings-item">
+                                    <label for="llm-api-base-url">LLM Base URL (OpenAI 兼容)</label>
+                                    <input type="text" id="llm-api-base-url" class="text-input" placeholder="https://api.openai.com/v1">
+                                    <small class="settings-hint">例如：https://api.deepseek.com/v1 或 https://api.openai.com/v1</small>
+                                </div>
+
+                                <div class="settings-item">
+                                    <label for="llm-model-name">LLM Model Name</label>
+                                    <input type="text" id="llm-model-name" class="text-input" placeholder="gpt-3.5-turbo" autocomplete="off" data-lpignore="true" data-form-type="other">
+                                    <small class="settings-hint">例如：deepseek-chat, gpt-4, gpt-3.5-turbo, claude-3-sonnet 等</small>
+                                </div>
+
+                                <div class="settings-item">
+                                    <label for="llm-api-key">LLM API Key (本地存储)</label>
+                                    <input type="password" id="llm-api-key" class="text-input" placeholder="sk-...">
+                                    <small class="settings-hint">API Key 将保存在本地配置文件中</small>
+                                </div>
+
+                                <div class="settings-item">
+                                    <label style="display: flex; align-items: center; gap: 10px;">
+                                        <input type="checkbox" id="llm-enable-web-search" style="width: auto; margin: 0;">
+                                        <span>启用联网搜索</span>
+                                    </label>
+                                    <small class="settings-hint">允许模型访问最新网络信息（需要模型支持，如 DeepSeek-R1、某些 GPT-4 版本等）</small>
+                                </div>
+
+                                <div class="settings-item">
+                                    <label style="display: flex; align-items: center; gap: 10px;">
+                                        <input type="checkbox" id="llm-enable-reasoning" style="width: auto; margin: 0;">
+                                        <span>启用深度思考/推理模式</span>
+                                    </label>
+                                    <small class="settings-hint">启用深度推理能力（需要推理模型支持，如 deepseek-reasoner、deepseek-r1 等）</small>
+                                </div>
+
+                                <button id="save-llm-config" class="btn btn-primary">💾 保存 LLM 配置</button>
+                            </div>
+
+                            <div class="settings-info">
+                                <h4>支持的模型</h4>
+                                <ul>
+                                    <li><strong>DeepSeek:</strong> Base URL: https://api.deepseek.com/v1, Model: deepseek-chat, deepseek-reasoner, deepseek-r1</li>
+                                    <li><strong>OpenAI:</strong> Base URL: https://api.openai.com/v1, Model: gpt-4, gpt-3.5-turbo, gpt-4-turbo</li>
+                                    <li><strong>其他兼容 OpenAI API 的服务:</strong> 使用对应的 Base URL 和 Model 名称</li>
+                                </ul>
+                                <h4>高级功能说明</h4>
+                                <ul>
+                                    <li><strong>联网搜索:</strong> 允许模型访问最新网络信息。支持此功能的模型包括 DeepSeek-R1、某些 GPT-4 版本等。启用后，模型可以获取实时信息。</li>
+                                    <li><strong>深度思考/推理模式:</strong> 启用深度推理能力，适合复杂问题分析。推荐使用专门的推理模型，如 deepseek-reasoner、deepseek-r1 等。</li>
+                                </ul>
+                                <p class="warning-text">⚠️ 请注意：API Key 会保存在本地配置文件中，请妥善保管。高级功能需要模型本身支持，不是所有模型都支持联网搜索和深度思考。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
