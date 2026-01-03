@@ -1,12 +1,17 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import asyncio
+import json
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any, List, Optional
 import json
 import os
+import concurrent.futures
+import threading
+from queue import Queue
 import hashlib
 import secrets
 from datetime import datetime, timedelta
@@ -75,8 +80,17 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     name: str
 
+class VariableItem(BaseModel):
+    name: str
+    key_content_key: str
+
+class PromptTemplateData(BaseModel):
+    template: str
+    variables: Optional[List[VariableItem]] = None
+    variable_key: Optional[str] = None  # 向后兼容旧格式
+
 class PromptTemplatesUpdate(BaseModel):
-    prompt_templates: Dict[str, Dict[str, str]]  # key: prompt名称, value: {template: "...", variable_key: "..."}
+    prompt_templates: Dict[str, PromptTemplateData]  # key: prompt名称, value: {template: "...", variables: [...]} 或 {template: "...", variable_key: "..."}
 
 class LLMConfigUpdate(BaseModel):
     api_base_url: str
@@ -204,22 +218,12 @@ def save_config(user_id: str, config: Dict[str, Any]):
 
 def generate_conversation_name(prompt_key: str, variable_value: str = "") -> str:
     """根据 prompt_key 生成有意义的对话名称"""
-    # 直接使用 prompt_key 作为名称（因为 prompt_key 就是关键内容字段名，比如"目标系统具体定义"）
+    # 直接使用 prompt_key 作为名称，去掉"模板"两字
+    name = prompt_key.replace("模板", "").strip()
+    
     # 如果名称太长，可以截取前30个字符
-    name = prompt_key
     if len(name) > 30:
         name = name[:27] + "..."
-    
-    # 如果提供了 variable_value，可以提取关键词作为补充
-    if variable_value:
-        # 尝试从 variable_value 中提取前几个字作为补充
-        words = variable_value.strip().replace('\n', ' ').split()
-        if words:
-            first_words = ''.join(words[:3])  # 取前3个词
-            if len(first_words) <= 10:
-                name = f"{prompt_key} - {first_words}"
-                if len(name) > 40:
-                    name = name[:37] + "..."
     
     return name
 
@@ -399,6 +403,164 @@ def call_llm_api(prompt: str, messages: Optional[List[Dict]] = None, user_id: Op
         traceback.print_exc()
         return error_msg
 
+async def call_llm_api_stream(messages: List[Dict], user_id: Optional[str] = None):
+    """调用 LLM API（流式版本，用于实时显示）"""
+    try:
+        # 优先从配置文件读取，如果没有则从环境变量读取
+        if user_id:
+            config = load_config(user_id)
+        else:
+            config_file = BASE_DIR / "config.json"
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            else:
+                config = {}
+        llm_config = config.get("llm_config", {})
+        
+        api_key = llm_config.get("api_key", "") or os.getenv("LLM_API_KEY", "")
+        base_url = llm_config.get("api_base_url", "") or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        model = llm_config.get("model_name", "") or os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+        
+        if not api_key:
+            error_msg = "⚠️ 错误：未检测到 API Key。请在「设置」页面输入并保存您的 LLM API Key。"
+            yield f"data: {json.dumps({'error': error_msg}, ensure_ascii=False)}\n\n"
+            return
+        
+        if not base_url:
+            base_url = "https://api.openai.com/v1"
+        
+        if not model:
+            model = "gpt-3.5-turbo"
+        
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+        
+        # 构建 API 调用参数（启用流式输出）
+        api_params = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "stream": True
+        }
+        
+        print(f"[DEBUG] 发送流式请求到 LLM API，消息数量: {len(messages)}")
+        
+        try:
+            # 使用asyncio.Queue实现真正的边读边写
+            async_queue = asyncio.Queue()
+            full_content = ""
+            error_occurred = False
+            stream_finished = asyncio.Event()
+            
+            # 获取当前事件循环（在主线程中）
+            loop = asyncio.get_event_loop()
+            
+            def process_stream_sync():
+                """在线程中处理同步stream，边读边放入异步队列"""
+                try:
+                    print(f"[DEBUG] 线程中开始创建stream...")
+                    stream = client.chat.completions.create(**api_params)
+                    print(f"[DEBUG] Stream创建成功，开始读取chunks...")
+                    chunk_count = 0
+                    # 边读边写：每读取一个chunk立即放入异步队列
+                    for chunk in stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if delta.content:
+                                chunk_count += 1
+                                # 立即放入异步队列（非阻塞，线程安全）
+                                asyncio.run_coroutine_threadsafe(
+                                    async_queue.put(delta.content), 
+                                    loop
+                                )
+                                if chunk_count % 10 == 0:
+                                    print(f"[DEBUG] 已读取 {chunk_count} 个chunks并放入队列")
+                    print(f"[DEBUG] Stream读取完成，共 {chunk_count} 个chunks")
+                    # 发送完成信号
+                    asyncio.run_coroutine_threadsafe(
+                        async_queue.put(None), 
+                        loop
+                    )
+                except Exception as e:
+                    print(f"[ERROR] 线程中处理stream异常: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    asyncio.run_coroutine_threadsafe(
+                        async_queue.put(("error", str(e))), 
+                        loop
+                    )
+                finally:
+                    # 设置完成标志（Event.set()是同步方法，使用call_soon_threadsafe）
+                    loop.call_soon_threadsafe(stream_finished.set)
+                    print(f"[DEBUG] 线程完成")
+            
+            # 在后台线程中启动stream处理
+            thread = threading.Thread(target=process_stream_sync, daemon=True)
+            thread.start()
+            
+            # 从异步队列中读取数据并立即yield（真正的边读边写）
+            chunk_yielded = 0
+            while True:
+                try:
+                    # 等待队列中的数据（异步等待，不阻塞，超时时间很短）
+                    item = await asyncio.wait_for(async_queue.get(), timeout=0.05)
+                    if item is None:
+                        # 完成信号
+                        print(f"[DEBUG] 收到完成信号，已yield {chunk_yielded} 个chunks")
+                        break
+                    elif isinstance(item, tuple) and item[0] == "error":
+                        # 错误
+                        error_occurred = True
+                        print(f"[ERROR] 收到错误信号: {item[1]}")
+                        yield f"data: {json.dumps({'error': f'⚠️ 错误: {item[1]}'}, ensure_ascii=False)}\n\n"
+                        break
+                    else:
+                        # 内容 - 立即yield，实现真正的边读边写
+                        content = item
+                        full_content += content
+                        chunk_yielded += 1
+                        if chunk_yielded % 10 == 0:
+                            print(f"[DEBUG] 已yield {chunk_yielded} 个chunks，当前总长度: {len(full_content)}")
+                        yield f"data: {json.dumps({'content': content, 'done': False}, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    # 超时，检查stream是否已完成
+                    if stream_finished.is_set():
+                        # 检查队列是否还有数据
+                        if async_queue.empty():
+                            print(f"[DEBUG] Stream完成且队列为空，退出循环，已yield {chunk_yielded} 个chunks")
+                            break
+                        else:
+                            # 还有数据，继续读取
+                            continue
+                    else:
+                        # Stream还在运行，继续等待
+                        continue
+                except Exception as e:
+                    print(f"[ERROR] 读取队列异常: {e}")
+                    if stream_finished.is_set():
+                        break
+                    continue
+            
+            if not error_occurred:
+                # 发送完成信号
+                yield f"data: {json.dumps({'content': '', 'done': True, 'full_content': full_content}, ensure_ascii=False)}\n\n"
+                print(f"[DEBUG] 流式响应完成，总长度: {len(full_content)}")
+            
+        except Exception as e:
+            error_str = str(e)
+            print(f"[ERROR] 流式API调用失败: {error_str}")
+            yield f"data: {json.dumps({'error': f'⚠️ 错误: {error_str}'}, ensure_ascii=False)}\n\n"
+            
+    except Exception as e:
+        error_str = str(e)
+        print(f"[ERROR] 流式API调用异常: {error_str}")
+        import traceback
+        traceback.print_exc()
+        yield f"data: {json.dumps({'error': f'⚠️ 错误: {error_str}'}, ensure_ascii=False)}\n\n"
+
 # 获取项目根目录
 BASE_DIR = Path(__file__).parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -519,7 +681,25 @@ async def get_prompt_templates(current_user_id: str = Depends(get_current_user))
 async def update_prompt_templates(data: PromptTemplatesUpdate, current_user_id: str = Depends(get_current_user)):
     """更新 Prompt 模板"""
     config = load_config(current_user_id)
-    config["prompt_templates"] = data.prompt_templates
+    # 将 Pydantic 模型转换为字典格式
+    prompt_templates_dict = {}
+    for key, template_data in data.prompt_templates.items():
+        template_dict = {
+            "template": template_data.template
+        }
+        # 支持新格式（variables数组）
+        if template_data.variables:
+            template_dict["variables"] = [
+                {"name": var.name, "key_content_key": var.key_content_key}
+                for var in template_data.variables
+            ]
+        # 向后兼容旧格式（variable_key）
+        elif template_data.variable_key:
+            template_dict["variable_key"] = template_data.variable_key
+        
+        prompt_templates_dict[key] = template_dict
+    
+    config["prompt_templates"] = prompt_templates_dict
     save_config(current_user_id, config)
     return {"success": True, "message": "Prompt 模板已保存"}
 
@@ -634,7 +814,7 @@ async def update_conversation(conversation_id: str, data: ConversationUpdate, cu
 
 @app.post("/api/conversations/{conversation_id}/chat")
 async def chat(conversation_id: str, request: ChatRequest, current_user_id: str = Depends(get_current_user)):
-    """对话接口"""
+    """对话接口（流式输出）"""
     try:
         config = load_config(current_user_id)
         conversations = config.get("conversations", {})
@@ -658,29 +838,46 @@ async def chat(conversation_id: str, request: ChatRequest, current_user_id: str 
                 "content": msg.get("content", "")
             })
         
-        # 调用 LLM API
-        print(f"[DEBUG] 调用 LLM API，消息数量: {len(message_history)}")
-        response_text = call_llm_api("", messages=message_history, user_id=current_user_id)
-        print(f"[DEBUG] LLM API 响应: {response_text[:100]}...")
-        
-        # 如果 response_text 包含错误信息，直接返回
-        if response_text.startswith("错误:") or response_text.startswith("⚠️"):
-            raise HTTPException(status_code=500, detail=response_text)
-        
-        # 添加助手回复
-        assistant_message = {
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        }
-        conversations[conversation_id]["messages"].append(assistant_message)
-        
+        # 保存用户消息
         save_config(current_user_id, config)
         
-        return {
-            "success": True,
-            "message": assistant_message
-        }
+        # 流式调用 LLM API
+        async def generate():
+            full_content = ""
+            try:
+                async for chunk in call_llm_api_stream(message_history, user_id=current_user_id):
+                    # 解析SSE数据
+                    if chunk.startswith("data: "):
+                        data_str = chunk[6:].strip()
+                        if data_str:
+                            try:
+                                data = json.loads(data_str)
+                                if "error" in data:
+                                    yield chunk
+                                    return
+                                elif "content" in data:
+                                    full_content += data.get("content", "")
+                                    yield chunk
+                                    if data.get("done", False):
+                                        # 流式响应完成，保存助手回复
+                                        assistant_message = {
+                                            "role": "assistant",
+                                            "content": data.get("full_content", full_content),
+                                            "timestamp": datetime.now().isoformat()
+                                        }
+                                        config = load_config(current_user_id)
+                                        if conversation_id in config.get("conversations", {}):
+                                            config["conversations"][conversation_id]["messages"].append(assistant_message)
+                                            save_config(current_user_id, config)
+                                        break
+                            except json.JSONDecodeError:
+                                continue
+            except Exception as e:
+                error_msg = f'data: {json.dumps({"error": f"⚠️ 错误: {str(e)}"}, ensure_ascii=False)}\n\n'
+                yield error_msg
+        
+        return StreamingResponse(generate(), media_type="text/event-stream")
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -721,60 +918,90 @@ async def send_prompt_to_model(request: Dict[str, Any], current_user_id: str = D
             raise HTTPException(status_code=400, detail=f"未找到对应的 Prompt 模板: {prompt_key}")
         
         template = prompt_item.get("template", "")
-        variable_key = prompt_item.get("variable_key", "")
         
         if not template:
             raise HTTPException(status_code=400, detail=f"Prompt 模板 {prompt_key} 的模板内容为空")
         
-        # 获取对应的关键内容（从 variable_key 指定的 key_content 中获取）
-        variable_value = key_content.get(variable_key, "")
-        if not variable_value:
-            raise HTTPException(status_code=400, detail=f"请先在「关键内容设置」页面填写: {variable_key}")
+        # 支持多个variables（新格式）或单个variable_key（旧格式，兼容）
+        full_prompt = template
+        variables = prompt_item.get("variables", [])
+        variable_key = prompt_item.get("variable_key", "")
         
-        # 替换变量生成完整prompt
-        full_prompt = template.replace("{variable}", variable_value)
+        print(f"[DEBUG] Prompt Item: {prompt_item}")
+        print(f"[DEBUG] Variables: {variables}")
+        print(f"[DEBUG] Variable Key: {variable_key}")
+        
+        if variables and len(variables) > 0:
+            # 新格式：多个variables
+            print(f"[DEBUG] 使用新格式，variables数量: {len(variables)}")
+            for variable in variables:
+                var_name = variable.get("name", "variable")
+                key_content_key = variable.get("key_content_key", "")
+                print(f"[DEBUG] 处理变量: name={var_name}, key_content_key={key_content_key}")
+                
+                if not key_content_key:
+                    raise HTTPException(status_code=400, detail=f"变量 {var_name} 未选择引用的关键内容。请在 Prompt 设置页面为该变量选择一个关键内容条目。")
+                
+                variable_value = key_content.get(key_content_key, "")
+                if not variable_value:
+                    raise HTTPException(status_code=400, detail=f"请先在「关键内容设置」页面填写: {key_content_key}")
+                
+                # 替换变量：{variable_name}
+                placeholder = f"{{{var_name}}}"
+                print(f"[DEBUG] 替换占位符: {placeholder} -> {variable_value[:50]}...")
+                full_prompt = full_prompt.replace(placeholder, variable_value)
+        elif variable_key:
+            # 旧格式：单个variable_key（向后兼容）
+            print(f"[DEBUG] 使用旧格式，variable_key: {variable_key}")
+            variable_value = key_content.get(variable_key, "")
+            if not variable_value:
+                raise HTTPException(status_code=400, detail=f"请先在「关键内容设置」页面填写: {variable_key}")
+            # 替换变量：{variable}
+            full_prompt = full_prompt.replace("{variable}", variable_value)
+        else:
+            # 没有variables，直接使用template
+            print(f"[DEBUG] 没有variables，直接使用template")
+            pass
         
         print(f"[发送Prompt] Prompt Key: {prompt_key}")
         print(f"[发送Prompt] 完整 Prompt: {full_prompt[:200]}...")
         
-        # 调用 LLM API
-        response_text = call_llm_api(full_prompt, user_id=current_user_id)
-        print(f"[发送Prompt] LLM API 响应成功，长度: {len(response_text)}")
-        
-        # 如果 response_text 包含错误信息，直接返回
-        if response_text.startswith("错误:") or response_text.startswith("⚠️"):
-            raise HTTPException(status_code=500, detail=response_text)
+        # 根据 prompt_key 生成对话名称（去掉"模板"）
+        conversation_name = generate_conversation_name(prompt_key)
         
         # 创建或获取当前对话
         conversation_id = config.get("current_conversation_id")
         is_new_conversation = False
         
         if not conversation_id:
+            # 创建新对话，使用 prompt 名称
             conversation_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # 根据 prompt_key 生成有意义的初始名称
-            initial_name = generate_conversation_name(prompt_key, variable_value)
             config["conversations"][conversation_id] = {
-                "name": initial_name,
+                "name": conversation_name,
                 "messages": [],
                 "created_at": conversation_id
             }
             config["current_conversation_id"] = conversation_id
             is_new_conversation = True
-        
-        if conversation_id not in config["conversations"]:
-            # 根据 prompt_key 生成有意义的初始名称
-            initial_name = generate_conversation_name(prompt_key, variable_value)
+        elif conversation_id not in config["conversations"]:
+            # 对话ID存在但对话数据不存在，创建新对话，使用 prompt 名称
             config["conversations"][conversation_id] = {
-                "name": initial_name,
+                "name": conversation_name,
                 "messages": [],
                 "created_at": conversation_id
             }
             is_new_conversation = True
-        
-        # 如果是新对话且名称还是默认的，更新为有意义的名称
-        if is_new_conversation and config["conversations"][conversation_id]["name"].startswith("对话_"):
-            initial_name = generate_conversation_name(prompt_key, variable_value)
-            config["conversations"][conversation_id]["name"] = initial_name
+        else:
+            # 对话已存在
+            # 如果对话名称是默认的（"新对话_xxxxxx"）或者对话还没有消息，说明是第一次发送 prompt，更新名称
+            existing_conversation = config["conversations"][conversation_id]
+            existing_name = existing_conversation.get("name", "")
+            existing_messages = existing_conversation.get("messages", [])
+            
+            # 如果名称是默认格式或者没有消息，说明是第一次发送 prompt，更新名称
+            if existing_name.startswith("新对话_") or len(existing_messages) == 0:
+                config["conversations"][conversation_id]["name"] = conversation_name
+            # 否则保持原有名称（不修改）
         
         # 添加用户消息（发送的prompt）
         user_message = {
@@ -785,22 +1012,47 @@ async def send_prompt_to_model(request: Dict[str, Any], current_user_id: str = D
         }
         config["conversations"][conversation_id]["messages"].append(user_message)
         
-        # 添加助手回复
-        assistant_message = {
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        }
-        config["conversations"][conversation_id]["messages"].append(assistant_message)
-        
+        # 保存用户消息
         save_config(current_user_id, config)
         
-        return {
-            "success": True,
-            "conversation_id": conversation_id,
-            "conversation_name": config["conversations"][conversation_id]["name"],
-            "message": assistant_message
-        }
+        # 构建消息历史用于流式调用
+        message_history = [{"role": "user", "content": full_prompt}]
+        
+        # 流式调用 LLM API
+        async def generate():
+            try:
+                async for chunk in call_llm_api_stream(message_history, user_id=current_user_id):
+                    # 解析SSE数据
+                    if chunk.startswith("data: "):
+                        data_str = chunk[6:].strip()
+                        if data_str:
+                            try:
+                                data = json.loads(data_str)
+                                if "error" in data:
+                                    yield chunk
+                                    return
+                                elif "content" in data:
+                                    # 转发内容
+                                    yield chunk
+                                    if data.get("done", False):
+                                        # 流式响应完成，保存助手回复
+                                        assistant_message = {
+                                            "role": "assistant",
+                                            "content": data.get("full_content", ""),
+                                            "timestamp": datetime.now().isoformat()
+                                        }
+                                        config = load_config(current_user_id)
+                                        if conversation_id in config.get("conversations", {}):
+                                            config["conversations"][conversation_id]["messages"].append(assistant_message)
+                                            save_config(current_user_id, config)
+                                        break
+                            except json.JSONDecodeError:
+                                continue
+            except Exception as e:
+                error_msg = f'data: {json.dumps({"error": f"⚠️ 错误: {str(e)}"}, ensure_ascii=False)}\n\n'
+                yield error_msg
+        
+        return StreamingResponse(generate(), media_type="text/event-stream")
     except HTTPException:
         raise
     except Exception as e:

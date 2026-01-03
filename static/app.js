@@ -489,7 +489,7 @@ function renderKeyContentInputs() {
     }
 }
 
-// 渲染 Prompt 输入框
+// 渲染 Prompt 输入框 - 支持多个variables
 function renderPromptInputs() {
     const container = document.getElementById('prompt-inputs');
     if (!container) return;
@@ -502,29 +502,58 @@ function renderPromptInputs() {
     
     for (const [promptKey, promptData] of Object.entries(promptTemplates)) {
         const template = promptData.template || '';
-        const variableKey = promptData.variable_key || '';
+        
+        // 兼容旧数据格式：如果有variable_key，转换为variables数组
+        let variables = [];
+        if (promptData.variables && Array.isArray(promptData.variables)) {
+            // 新格式：使用variables数组
+            variables = promptData.variables;
+        } else if (promptData.variable_key) {
+            // 旧格式：转换为新格式
+            variables = [{name: 'variable1', key_content_key: promptData.variable_key}];
+        } else {
+            // 默认：至少有一个variable（命名为variable1）
+            variables = [{name: 'variable1', key_content_key: ''}];
+        }
         
         const item = document.createElement('div');
         item.className = 'key-content-item prompt-item';
         item.dataset.key = promptKey;
+        
+        // 构建variables HTML
+        const variablesHtml = variables.map((variable, index) => {
+            const varName = variable.name || `variable${index + 1}`;
+            const varKeyContentKey = variable.key_content_key || '';
+            return `
+                <div class="variable-item" data-variable-index="${index}">
+                    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
+                        <input type="text" class="variable-name-input" value="${escapeHtml(varName)}" placeholder="变量名（如：variable1）" style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                        <select class="variable-key-select" style="flex: 2; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="">请选择引用的关键内容条目</option>
+                            ${keyContentKeys.map(k => `<option value="${escapeHtml(k)}" ${k === varKeyContentKey ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('')}
+                        </select>
+                        <button class="btn-delete-variable" data-variable-index="${index}" title="删除变量" style="padding: 6px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">🗑️</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
         item.innerHTML = `
             <div class="item-header">
                 <input type="text" class="item-name-input" value="${escapeHtml(promptKey)}" data-key="${promptKey}" placeholder="Prompt 名称">
                 <button class="btn-delete-item" data-key="${promptKey}" title="删除条目">🗑️</button>
             </div>
             <div class="prompt-item-config">
-                <label>引用关键内容：</label>
-                <select class="variable-key-select" data-key="${promptKey}">
-                    <option value="">请选择引用的关键内容条目</option>
-                    ${keyContentKeys.map(k => `<option value="${escapeHtml(k)}" ${k === variableKey ? 'selected' : ''}>${escapeHtml(k)}</option>`).join('')}
-                </select>
+                <label style="display: block; margin-bottom: 10px; font-weight: 600;">引用关键内容：</label>
+                <div class="variables-container" data-key="${promptKey}">
+                    ${variablesHtml}
+                </div>
+                <button class="btn-add-variable" data-key="${promptKey}" style="margin-top: 10px; padding: 8px 15px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">➕ 添加变量</button>
             </div>
-            <textarea class="text-area" data-key="${promptKey}" placeholder="在此输入 Prompt 模板，可以使用 {variable} 作为占位符">${escapeHtml(template)}</textarea>
-            <small style="color: #777; font-size: 12px;">提示: 使用 {variable} 作为变量占位符，系统会自动替换为上面选择的关键内容</small>
+            <textarea class="text-area" data-key="${promptKey}" placeholder="在此输入 Prompt 模板，可以使用 {variable1}, {variable2} 等作为占位符">${escapeHtml(template)}</textarea>
+            <small style="color: #777; font-size: 12px;">提示: 使用 {变量名} 作为变量占位符，系统会自动替换为上面选择的关键内容</small>
         `;
         container.appendChild(item);
-        // 初始化标签显示
-        updatePromptItemLabel(item);
     }
 }
 
@@ -545,26 +574,91 @@ function loadPromptSelector() {
     }
 }
 
-// 渲染对话选择器（第三个页面）
+// 渲染对话选择器（第三个页面）- 改为列表显示
 function renderChatConversationSelector() {
-    const selector = document.getElementById('conversation-selector');
-    if (!selector) return;
+    const listContainer = document.getElementById('conversation-list');
+    if (!listContainer) return;
     
-    selector.innerHTML = '<option value="">暂无对话</option>';
+    listContainer.innerHTML = '';
     
     const conversationIds = Object.keys(state.conversations);
     if (conversationIds.length === 0) {
+        listContainer.innerHTML = '<div class="conversation-empty">暂无对话</div>';
         return;
     }
     
-    conversationIds.forEach(id => {
-        const option = document.createElement('option');
-        option.value = id;
-        option.textContent = state.conversations[id].name || `对话_${id}`;
-        if (id === state.currentConversationId) {
-            option.selected = true;
+    // 按创建时间排序（旧的在上，新的在下）
+    const sortedIds = conversationIds.sort((a, b) => {
+        const timeA = state.conversations[a].created_at || a;
+        const timeB = state.conversations[b].created_at || b;
+        return timeA.localeCompare(timeB);
+    });
+    
+    // 统计同名对话，用于添加版本号（不修改原始数据，使用临时变量）
+    const nameCounts = {};
+    const nameVersions = {};
+    const displayNames = {}; // 临时存储显示名称
+    
+    // 第一遍：统计每个名称出现的次数
+    sortedIds.forEach(id => {
+        const name = state.conversations[id].name || `对话_${id}`;
+        nameCounts[name] = (nameCounts[name] || 0) + 1;
+    });
+    
+    // 第二遍：为同名对话分配版本号
+    sortedIds.forEach(id => {
+        const name = state.conversations[id].name || `对话_${id}`;
+        if (nameCounts[name] > 1) {
+            if (!nameVersions[name]) {
+                nameVersions[name] = 0;
+            }
+            nameVersions[name]++;
+            const version = nameVersions[name];
+            // 第一个不加版本号，后续加v2, v3...
+            if (version === 1) {
+                // 第一个，不加版本号
+                displayNames[id] = name;
+            } else {
+                displayNames[id] = `${name} v${version}`;
+            }
+        } else {
+            displayNames[id] = name;
         }
-        selector.appendChild(option);
+    });
+    
+    // 渲染列表项
+    sortedIds.forEach(id => {
+        const conversation = state.conversations[id];
+        const displayName = displayNames[id] || conversation.name || `对话_${id}`;
+        
+        const item = document.createElement('div');
+        item.className = 'conversation-item';
+        item.dataset.conversationId = id;
+        if (id === state.currentConversationId) {
+            item.classList.add('active');
+        }
+        item.textContent = displayName;
+        
+        // 点击选择对话
+        item.addEventListener('click', async () => {
+            try {
+                await fetch(`${API_BASE}/conversations/${id}/select`, {
+                    method: 'PUT',
+                    headers: getAuthHeaders()
+                });
+                state.currentConversationId = id;
+                await loadConversationMessages(id);
+                renderChatConversationSelector(); // 重新渲染以更新active状态
+                const nameInput = document.getElementById('conversation-name');
+                if (nameInput) {
+                    nameInput.value = conversation.name || '';
+                }
+            } catch (error) {
+                console.error('选择对话失败:', error);
+            }
+        });
+        
+        listContainer.appendChild(item);
     });
     
     // 更新对话名称输入框
@@ -642,27 +736,64 @@ const autoSaveKeyContent = debounce(async () => {
     }
 }, 1500); // 1.5秒后保存
 
-// 自动保存 Prompt 模板
-const autoSavePromptTemplates = debounce(async () => {
+// 保存 Prompt 模板的核心函数（不防抖）
+async function savePromptTemplates() {
+    console.log('[DEBUG] 开始保存 Prompt 模板...');
     const promptTemplates = {};
-    document.querySelectorAll('#prompt-inputs .key-content-item').forEach(item => {
+    const items = document.querySelectorAll('#prompt-inputs .key-content-item');
+    console.log('[DEBUG] 找到', items.length, '个 Prompt 条目');
+    
+    items.forEach((item, index) => {
         const nameInput = item.querySelector('.item-name-input');
         const textarea = item.querySelector('textarea[data-key]');
-        const variableSelect = item.querySelector('.variable-key-select');
+        const variablesContainer = item.querySelector('.variables-container');
         
-        if (nameInput && textarea && variableSelect) {
+        console.log(`[DEBUG] 条目 ${index}:`, {
+            hasNameInput: !!nameInput,
+            hasTextarea: !!textarea,
+            hasVariablesContainer: !!variablesContainer
+        });
+        
+        if (nameInput && textarea && variablesContainer) {
             const name = nameInput.value.trim();
             const template = textarea.value.trim();
-            const variableKey = variableSelect.value;
+            
+            // 收集所有variables
+            const variables = [];
+            const variableItems = variablesContainer.querySelectorAll('.variable-item');
+            console.log(`[DEBUG] 条目 ${index} "${name}": 找到 ${variableItems.length} 个 variables`);
+            
+            variableItems.forEach((varItem, varIndex) => {
+                const varNameInput = varItem.querySelector('.variable-name-input');
+                const varKeySelect = varItem.querySelector('.variable-key-select');
+                if (varNameInput && varKeySelect) {
+                    const varName = varNameInput.value.trim() || 'variable';
+                    const keyContentKey = varKeySelect.value.trim();
+                    variables.push({
+                        name: varName,
+                        key_content_key: keyContentKey
+                    });
+                    console.log(`[DEBUG] Variable ${varIndex}: name="${varName}", key="${keyContentKey}"`);
+                } else {
+                    console.warn(`[DEBUG] Variable ${varIndex}: 缺少输入框或选择器`);
+                }
+            });
             
             if (name) {
                 promptTemplates[name] = {
                     template: template,
-                    variable_key: variableKey
+                    variables: variables
                 };
+                console.log(`[DEBUG] 已添加 Prompt: "${name}"，包含 ${variables.length} 个 variables`);
+            } else {
+                console.warn(`[DEBUG] 条目 ${index}: 名称为空，跳过`);
             }
+        } else {
+            console.warn(`[DEBUG] 条目 ${index}: 缺少必要的元素`);
         }
     });
+    
+    console.log('[DEBUG] 准备保存的 Prompt 模板:', promptTemplates);
     
     try {
         const response = await fetch(`${API_BASE}/config/prompt-templates`, {
@@ -671,19 +802,31 @@ const autoSavePromptTemplates = debounce(async () => {
             body: JSON.stringify({ prompt_templates: promptTemplates })
         });
         
+        console.log('[DEBUG] 保存响应状态:', response.status);
+        
         if (response.ok) {
             state.promptTemplates = promptTemplates;
             // 更新第三个页面的选择器
             loadPromptSelector();
             showAutoSaveSuccess('Prompt 模板已自动保存');
+            console.log('[DEBUG] 保存成功！');
         } else if (response.status === 401) {
+            console.error('[DEBUG] 认证失败，需要重新登录');
             clearToken();
             showLoginPage();
+        } else {
+            const errorText = await response.text();
+            console.error('[DEBUG] 保存失败，状态码:', response.status, '错误信息:', errorText);
+            showError('保存失败: ' + errorText);
         }
     } catch (error) {
-        console.error('自动保存失败:', error);
+        console.error('[DEBUG] 自动保存异常:', error);
+        showError('保存失败: ' + error.message);
     }
-}, 1500); // 1.5秒后保存
+}
+
+// 自动保存 Prompt 模板 - 支持多个variables（带防抖，用于输入变化）
+const autoSavePromptTemplates = debounce(savePromptTemplates, 1500); // 1.5秒后保存
 
 // 显示自动保存成功提示（更轻量的提示）
 function showAutoSaveSuccess(message) {
@@ -877,7 +1020,7 @@ function setupEventListeners() {
         });
     }
     
-    // 添加 Prompt 模板条目 - 使用事件委托避免重复绑定
+    // 添加 Prompt 模板条目 - 支持多个variables
     const addPromptItemBtn = document.getElementById('add-prompt-item');
     if (addPromptItemBtn) {
         // 移除旧的事件监听器（通过克隆节点）
@@ -894,25 +1037,37 @@ function setupEventListeners() {
             const item = document.createElement('div');
             item.className = 'key-content-item prompt-item';
             item.dataset.key = newKey;
+            
+            // 默认创建一个variable（命名为variable1）
+            const defaultVariableHtml = `
+                <div class="variable-item" data-variable-index="0">
+                    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
+                        <input type="text" class="variable-name-input" value="variable1" placeholder="变量名（如：variable1）" style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                        <select class="variable-key-select" style="flex: 2; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="">请选择引用的关键内容条目</option>
+                            ${keyContentKeys.map(k => `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('')}
+                        </select>
+                        <button class="btn-delete-variable" data-variable-index="0" title="删除变量" style="padding: 6px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">🗑️</button>
+                    </div>
+                </div>
+            `;
+            
             item.innerHTML = `
                 <div class="item-header">
                     <input type="text" class="item-name-input" value="${newKey}" data-key="${newKey}" placeholder="Prompt 名称">
                     <button class="btn-delete-item" data-key="${newKey}" title="删除条目">🗑️</button>
                 </div>
                 <div class="prompt-item-config">
-                    <label>引用关键内容：</label>
-                    <select class="variable-key-select" data-key="${newKey}">
-                        <option value="">请选择引用的关键内容条目</option>
-                        ${keyContentKeys.map(k => `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('')}
-                    </select>
+                    <label style="display: block; margin-bottom: 10px; font-weight: 600;">引用关键内容：</label>
+                    <div class="variables-container" data-key="${newKey}">
+                        ${defaultVariableHtml}
+                    </div>
+                    <button class="btn-add-variable" data-key="${newKey}" style="margin-top: 10px; padding: 8px 15px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px;">➕ 添加变量</button>
                 </div>
-                <textarea class="text-area" data-key="${newKey}" placeholder="在此输入 Prompt 模板，可以使用 {variable} 作为占位符"></textarea>
-                <small style="color: #777; font-size: 12px;">提示: 使用 {variable} 作为变量占位符，系统会自动替换为上面选择的关键内容</small>
+                <textarea class="text-area" data-key="${newKey}" placeholder="在此输入 Prompt 模板，可以使用 {variable1}, {variable2} 等作为占位符"></textarea>
+                <small style="color: #777; font-size: 12px;">提示: 使用 {变量名} 作为变量占位符，系统会自动替换为上面选择的关键内容</small>
             `;
             container.appendChild(item);
-            
-            // 初始化标签显示
-            updatePromptItemLabel(item);
             
             // 绑定删除按钮事件
             item.querySelector('.btn-delete-item').addEventListener('click', function() {
@@ -923,6 +1078,92 @@ function setupEventListeners() {
             });
         });
     }
+    
+    // 添加variable按钮事件处理（使用事件委托，防止重复绑定）
+    // 使用一个标志来确保只绑定一次
+    if (!window._variableEventBound) {
+        document.addEventListener('click', (e) => {
+            // 检查点击的是按钮本身或其子元素
+            const addBtn = e.target.closest('.btn-add-variable');
+            if (addBtn) {
+                console.log('[DEBUG] 点击了添加variable按钮');
+                e.preventDefault();
+                e.stopPropagation();
+                
+                const promptKey = addBtn.dataset.key;
+                console.log('[DEBUG] Prompt Key:', promptKey);
+                const variablesContainer = addBtn.previousElementSibling;
+                if (!variablesContainer || !variablesContainer.classList.contains('variables-container')) {
+                    console.error('[DEBUG] 找不到variables-container');
+                    return;
+                }
+                console.log('[DEBUG] 找到variables-container');
+                
+                const keyContent = state.config?.key_content || {};
+                const keyContentKeys = Object.keys(keyContent);
+                const currentVariableCount = variablesContainer.querySelectorAll('.variable-item').length;
+                
+                const newVariableHtml = `
+                    <div class="variable-item" data-variable-index="${currentVariableCount}">
+                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px;">
+                            <input type="text" class="variable-name-input" value="variable${currentVariableCount + 1}" placeholder="变量名（如：variable1）" style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <select class="variable-key-select" style="flex: 2; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                                <option value="">请选择引用的关键内容条目</option>
+                                ${keyContentKeys.map(k => `<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('')}
+                            </select>
+                            <button class="btn-delete-variable" data-variable-index="${currentVariableCount}" title="删除变量" style="padding: 6px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">🗑️</button>
+                        </div>
+                    </div>
+                `;
+                
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = newVariableHtml;
+                const newVariableElement = tempDiv.firstElementChild;
+                variablesContainer.appendChild(newVariableElement);
+                
+                // 等待DOM更新后立即保存（不使用防抖），因为这是结构性变化
+                setTimeout(() => {
+                    console.log('[DEBUG] 添加variable后触发保存');
+                    savePromptTemplates();
+                }, 100);
+            }
+        });
+        window._variableEventBound = true;
+    }
+    
+    // 删除variable按钮事件处理（使用事件委托）
+    document.addEventListener('click', (e) => {
+        if (e.target.classList.contains('btn-delete-variable')) {
+            console.log('[DEBUG] 点击了删除variable按钮');
+            const variableItem = e.target.closest('.variable-item');
+            if (variableItem) {
+                const variablesContainer = variableItem.closest('.variables-container');
+                const variableCount = variablesContainer.querySelectorAll('.variable-item').length;
+                console.log('[DEBUG] 当前variable数量:', variableCount);
+                if (variableCount <= 1) {
+                    showError('至少需要保留一个变量');
+                    return;
+                }
+                variableItem.remove();
+                console.log('[DEBUG] variable已删除');
+                // 重新编号
+                variablesContainer.querySelectorAll('.variable-item').forEach((item, index) => {
+                    item.dataset.variableIndex = index;
+                    const deleteBtn = item.querySelector('.btn-delete-variable');
+                    if (deleteBtn) {
+                        deleteBtn.dataset.variableIndex = index;
+                    }
+                });
+                // 等待DOM更新后立即保存（不使用防抖），因为这是结构性变化
+                setTimeout(() => {
+                    console.log('[DEBUG] 删除variable后触发保存');
+                    savePromptTemplates();
+                }, 100);
+            } else {
+                console.error('[DEBUG] 找不到variable-item');
+            }
+        }
+    });
     
     // 删除 Prompt 模板条目
     document.addEventListener('click', (e) => {
@@ -944,25 +1185,33 @@ function setupEventListeners() {
         }
     });
     
-    // 监听 Prompt 模板变化，自动保存
-    const promptContainer = document.getElementById('prompt-inputs');
-    if (promptContainer) {
-        // 使用事件委托监听所有输入变化
-        promptContainer.addEventListener('input', (e) => {
-            if (e.target.matches('textarea[data-key], .item-name-input')) {
-                autoSavePromptTemplates();
+    // 监听 Prompt 模板变化，自动保存（使用全局事件委托，确保始终工作）
+    // 使用一个标志来确保只绑定一次
+    if (!window._promptAutoSaveBound) {
+        // 监听输入变化
+        document.addEventListener('input', (e) => {
+            // 检查是否在prompt-inputs容器内
+            if (e.target.closest('#prompt-inputs')) {
+                if (e.target.matches('textarea[data-key], .item-name-input, .variable-name-input')) {
+                    autoSavePromptTemplates();
+                }
             }
         });
         
         // 监听下拉框变化
-        promptContainer.addEventListener('change', (e) => {
-            if (e.target.matches('.variable-key-select')) {
-                autoSavePromptTemplates();
+        document.addEventListener('change', (e) => {
+            // 检查是否在prompt-inputs容器内
+            if (e.target.closest('#prompt-inputs')) {
+                if (e.target.matches('.variable-key-select')) {
+                    autoSavePromptTemplates();
+                }
             }
         });
+        
+        window._promptAutoSaveBound = true;
     }
     
-    // 保留手动保存按钮（可选，用于立即保存）
+    // 保留手动保存按钮（可选，用于立即保存）- 支持多个variables
     const savePromptsBtn = document.getElementById('save-prompts');
     if (savePromptsBtn) {
         savePromptsBtn.addEventListener('click', async () => {
@@ -970,17 +1219,32 @@ function setupEventListeners() {
             document.querySelectorAll('#prompt-inputs .key-content-item').forEach(item => {
                 const nameInput = item.querySelector('.item-name-input');
                 const textarea = item.querySelector('textarea[data-key]');
-                const variableSelect = item.querySelector('.variable-key-select');
+                const variablesContainer = item.querySelector('.variables-container');
                 
-                if (nameInput && textarea && variableSelect) {
+                if (nameInput && textarea && variablesContainer) {
                     const name = nameInput.value.trim();
                     const template = textarea.value.trim();
-                    const variableKey = variableSelect.value;
+                    
+                    // 收集所有variables
+                    const variables = [];
+                    const variableItems = variablesContainer.querySelectorAll('.variable-item');
+                    variableItems.forEach(varItem => {
+                        const varNameInput = varItem.querySelector('.variable-name-input');
+                        const varKeySelect = varItem.querySelector('.variable-key-select');
+                        if (varNameInput && varKeySelect) {
+                            const varName = varNameInput.value.trim() || 'variable';
+                            const keyContentKey = varKeySelect.value.trim();
+                            variables.push({
+                                name: varName,
+                                key_content_key: keyContentKey
+                            });
+                        }
+                    });
                     
                     if (name) {
                         promptTemplates[name] = {
                             template: template,
-                            variable_key: variableKey
+                            variables: variables
                         };
                     }
                 }
@@ -1087,50 +1351,36 @@ function setupEventListeners() {
     if (newConversationBtn) {
         newConversationBtn.addEventListener('click', async () => {
             try {
+                console.log('[DEBUG] 开始创建新对话');
                 const response = await fetch(`${API_BASE}/conversations`, {
                     method: 'POST',
                     headers: getAuthHeaders(),
                     body: JSON.stringify({})
                 });
                 
+                console.log('[DEBUG] 创建对话响应状态:', response.status);
+                
                 if (response.ok) {
                     const data = await response.json();
+                    console.log('[DEBUG] 创建对话成功:', data);
                     await loadConversations();
                     state.currentConversationId = data.conversation_id;
                     renderChatConversationSelector();
                     renderMessages([]);
                     showSuccess('新对话已创建');
+                } else {
+                    const errorData = await response.json().catch(() => ({ detail: '未知错误' }));
+                    console.error('[DEBUG] 创建对话失败，状态码:', response.status, '错误:', errorData);
+                    showError('创建对话失败: ' + (errorData.detail || '服务器错误'));
                 }
             } catch (error) {
-                console.error('创建对话失败:', error);
-                showError('创建对话失败');
+                console.error('[DEBUG] 创建对话异常:', error);
+                showError('创建对话失败: ' + error.message);
             }
         });
     }
     
-    // 选择对话（第三个页面）
-    const conversationSelector = document.getElementById('conversation-selector');
-    if (conversationSelector) {
-        conversationSelector.addEventListener('change', async (e) => {
-            const conversationId = e.target.value;
-            if (conversationId) {
-                try {
-                    await fetch(`${API_BASE}/conversations/${conversationId}/select`, {
-                        method: 'PUT',
-                        headers: getAuthHeaders()
-                    });
-                    state.currentConversationId = conversationId;
-                    await loadConversationMessages(conversationId);
-                    const nameInput = document.getElementById('conversation-name');
-                    if (nameInput) {
-                        nameInput.value = state.conversations[conversationId].name || '';
-                    }
-                } catch (error) {
-                    console.error('选择对话失败:', error);
-                }
-            }
-        });
-    }
+    // 选择对话（第三个页面）- 现在通过列表项点击事件处理，见 renderChatConversationSelector()
     
     // 更新对话名称（第三个页面）
     const conversationNameInput = document.getElementById('conversation-name');
@@ -1220,37 +1470,142 @@ function setupEventListeners() {
                 });
                 
                 if (response.ok) {
-                    const data = await response.json();
-                    // 检查返回的消息内容是否包含错误信息（如余额不足）
-                    const messageContent = data.message?.content || '';
-                    if (messageContent.includes('⚠️') && (messageContent.includes('余额不足') || messageContent.includes('配额已用完'))) {
-                        if (loadingDiv.parentNode) loadingDiv.remove();
-                        showError(messageContent + ' 请前往「设置」页面检查 API Key 配置。');
-                        // 显示错误消息
-                        if (container) {
-                            const errorMsgDiv = document.createElement('div');
-                            errorMsgDiv.className = 'message assistant';
-                            errorMsgDiv.innerHTML = `<div class="message-content error-message">${escapeHtml(messageContent)}</div>`;
-                            container.appendChild(errorMsgDiv);
-                            container.scrollTop = container.scrollHeight;
-                        }
-                    } else {
-                        state.currentConversationId = data.conversation_id;
-                        await loadConversations();
-                        renderChatConversationSelector();
-                        // 如果是新创建的对话，更新名称输入框
-                        if (data.conversation_name) {
-                            const nameInput = document.getElementById('conversation-name');
-                            if (nameInput) {
-                                nameInput.value = data.conversation_name;
+                    loadingDiv.remove();
+                    
+                    // 检查响应类型
+                    const contentType = response.headers.get('content-type');
+                    console.log('[DEBUG] Prompt响应Content-Type:', contentType);
+                    
+                    // 清空info消息
+                    if (container && container.children.length === 1 && container.children[0].classList.contains('info-message')) {
+                        container.innerHTML = '';
+                    }
+                    
+                    // 创建助手消息容器（立即创建，确保可见）
+                    const assistantMsgDiv = document.createElement('div');
+                    assistantMsgDiv.className = 'message assistant';
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'message-content';
+                    contentDiv.textContent = ''; // 初始为空
+                    assistantMsgDiv.appendChild(contentDiv);
+                    if (container) {
+                        container.appendChild(assistantMsgDiv);
+                        container.scrollTop = container.scrollHeight;
+                    }
+                    console.log('[DEBUG] 已创建Prompt助手消息容器');
+                    
+                    // 检查是否是流式响应
+                    if (contentType && contentType.includes('text/event-stream')) {
+                        console.log('[DEBUG] 检测到Prompt流式响应，开始接收...');
+                        // 接收流式响应
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = '';
+                        let fullContent = '';
+                        let hasError = false;
+                        let hasReceivedData = false;
+                        
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    console.log('[DEBUG] Prompt流式响应读取完成，总长度:', fullContent.length);
+                                    break;
+                                }
+                                
+                                buffer += decoder.decode(value, { stream: true });
+                                const lines = buffer.split('\n');
+                                buffer = lines.pop() || ''; // 保留最后一个不完整的行
+                                
+                                for (const line of lines) {
+                                    if (line.trim() === '') continue; // 跳过空行
+                                    
+                                    if (line.startsWith('data: ')) {
+                                        const dataStr = line.slice(6).trim();
+                                        if (dataStr) {
+                                            try {
+                                                const data = JSON.parse(dataStr);
+                                                console.log('[DEBUG] 收到Prompt SSE数据:', data);
+                                                hasReceivedData = true;
+                                                
+                                                if (data.error) {
+                                                    // 错误处理
+                                                    hasError = true;
+                                                    console.log('[DEBUG] 收到Prompt错误:', data.error);
+                                                    contentDiv.innerHTML = `<div class="error-message">${escapeHtml(data.error)}</div>`;
+                                                    showError(data.error);
+                                                    // 标记需要退出外层循环
+                                                    throw new Error('STREAM_ERROR'); // 使用异常来退出所有循环
+                                                } else if (data.content !== undefined) {
+                                                    if (data.done) {
+                                                        // 完成，使用Markdown渲染完整内容
+                                                        const finalContent = data.full_content || fullContent;
+                                                        console.log('[DEBUG] Prompt流式响应完成，总长度:', finalContent.length);
+                                                        try {
+                                                            contentDiv.innerHTML = marked.parse(finalContent);
+                                                        } catch (e) {
+                                                            contentDiv.innerHTML = escapeHtml(finalContent);
+                                                        }
+                                                        // 重新加载对话以更新状态
+                                                        await loadConversations();
+                                                        state.currentConversationId = state.currentConversationId || Object.keys(state.conversations)[0];
+                                                        renderChatConversationSelector();
+                                                        // 更新名称输入框
+                                                        const nameInput = document.getElementById('conversation-name');
+                                                        if (nameInput && state.currentConversationId && state.conversations[state.currentConversationId]) {
+                                                            nameInput.value = state.conversations[state.currentConversationId].name || '';
+                                                        }
+                                                        showSuccess('Prompt 已发送并收到回复！');
+                                                    } else if (data.content) {
+                                                        // 追加内容（只有非空内容才追加）
+                                                        fullContent += data.content;
+                                                        console.log('[DEBUG] Prompt更新内容，当前长度:', fullContent.length);
+                                                        // 实时更新显示（使用Markdown渲染）
+                                                        try {
+                                                            contentDiv.innerHTML = marked.parse(fullContent);
+                                                        } catch (e) {
+                                                            contentDiv.textContent = fullContent;
+                                                        }
+                                                        if (container) {
+                                                            container.scrollTop = container.scrollHeight;
+                                                        }
+                                                    }
+                                                }
+                                            } catch (e) {
+                                                console.error('[DEBUG] 解析Prompt SSE数据失败:', e, '数据:', dataStr);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                if (hasError) break;
+                            }
+                        } catch (error) {
+                            console.error('[DEBUG] 读取Prompt流式响应失败:', error);
+                            if (!hasError) {
+                                contentDiv.innerHTML = `<div class="error-message">接收响应失败: ${escapeHtml(error.message)}</div>`;
+                                showError('接收响应失败: ' + error.message);
                             }
                         }
-                        await loadConversationMessages(data.conversation_id);
-                        showSuccess('Prompt 已发送并收到回复！');
+                    } else {
+                        // 非流式响应（回退方案）
+                        console.log('[DEBUG] Prompt非流式响应，使用JSON解析');
+                        const data = await response.json();
+                        const messageContent = data.message?.content || '';
+                        if (messageContent) {
+                            try {
+                                contentDiv.innerHTML = marked.parse(messageContent);
+                            } catch (e) {
+                                contentDiv.innerHTML = escapeHtml(messageContent);
+                            }
+                            await loadConversations();
+                            renderChatConversationSelector();
+                            showSuccess('Prompt 已发送并收到回复！');
+                        }
                     }
                 } else {
+                    loadingDiv.remove();
                     const error = await response.json();
-                    if (loadingDiv.parentNode) loadingDiv.remove();
                     const errorMsg = error.detail || '发送失败';
                     // 检查是否是API Key未设置的问题
                     if (errorMsg.includes('未检测到 API Key') || errorMsg.includes('未设置 API Key')) {
@@ -1359,45 +1714,127 @@ async function sendMessage() {
         });
         
         if (response.ok) {
-            const data = await response.json();
             loadingDiv.remove();
             
-            // 检查返回的消息内容是否包含错误信息
-            const messageContent = data.message.content || '';
-            if (messageContent.includes('⚠️')) {
-                // 检查是否是API Key未设置的问题
-                if (messageContent.includes('未检测到 API Key') || messageContent.includes('未设置 API Key')) {
-                    showError(messageContent + ' 请前往「设置」页面输入并保存 API Key。');
-                } else if (messageContent.includes('余额不足') || messageContent.includes('配额已用完')) {
-                    showError(messageContent + ' 请前往「设置」页面检查 API Key 配置。');
-                } else if (messageContent.includes('API Key 无效') || messageContent.includes('未授权')) {
-                    showError(messageContent + ' 请前往「设置」页面检查并更新 API Key。');
-                } else {
-                    showError(messageContent);
-                }
-                // 仍然显示错误消息在对话中，但不添加为正常的助手回复
-                const errorMsgDiv = document.createElement('div');
-                errorMsgDiv.className = 'message assistant';
-                errorMsgDiv.innerHTML = `<div class="message-content error-message">${escapeHtml(messageContent)}</div>`;
-                container.appendChild(errorMsgDiv);
-                container.scrollTop = container.scrollHeight;
-            } else {
-                const assistantMsgDiv = document.createElement('div');
-                assistantMsgDiv.className = 'message assistant';
-                // 使用 Markdown 渲染助手回复
-                try {
-                    const contentHtml = marked.parse(messageContent);
-                    assistantMsgDiv.innerHTML = `<div class="message-content">${contentHtml}</div>`;
-                } catch (e) {
-                    console.error('Markdown 渲染错误:', e);
-                    assistantMsgDiv.innerHTML = `<div class="message-content">${escapeHtml(messageContent)}</div>`;
-                }
-                container.appendChild(assistantMsgDiv);
-                container.scrollTop = container.scrollHeight;
-            }
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            console.log('[DEBUG] 响应Content-Type:', contentType);
             
-            await loadConversations();
-            renderChatConversationSelector();
+            // 创建助手消息容器（立即创建，确保可见）
+            const assistantMsgDiv = document.createElement('div');
+            assistantMsgDiv.className = 'message assistant';
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = ''; // 初始为空，等待流式数据
+            assistantMsgDiv.appendChild(contentDiv);
+            container.appendChild(assistantMsgDiv);
+            container.scrollTop = container.scrollHeight;
+            console.log('[DEBUG] 已创建助手消息容器');
+            
+            // 检查是否是流式响应
+            if (contentType && contentType.includes('text/event-stream')) {
+                console.log('[DEBUG] 检测到流式响应，开始接收...');
+                // 接收流式响应
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let fullContent = '';
+                let hasError = false;
+                let hasReceivedData = false;
+                
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            console.log('[DEBUG] 流式响应读取完成，总长度:', fullContent.length);
+                            if (!hasReceivedData && fullContent.length === 0) {
+                                // 没有收到任何数据，可能是错误
+                                contentDiv.innerHTML = '<div class="error-message">未收到响应数据</div>';
+                            }
+                            break;
+                        }
+                        
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // 保留最后一个不完整的行
+                        
+                        for (const line of lines) {
+                            if (line.trim() === '') continue; // 跳过空行
+                            
+                            if (line.startsWith('data: ')) {
+                                const dataStr = line.slice(6).trim();
+                                if (dataStr) {
+                                    try {
+                                        const data = JSON.parse(dataStr);
+                                        console.log('[DEBUG] 收到SSE数据:', data);
+                                        hasReceivedData = true;
+                                        
+                                        if (data.error) {
+                                            // 错误处理
+                                            hasError = true;
+                                            console.log('[DEBUG] 收到错误:', data.error);
+                                            contentDiv.innerHTML = `<div class="error-message">${escapeHtml(data.error)}</div>`;
+                                            showError(data.error);
+                                            // 标记需要退出外层循环
+                                            throw new Error('STREAM_ERROR'); // 使用异常来退出所有循环
+                                        } else if (data.content !== undefined) {
+                                            if (data.done) {
+                                                // 完成，使用Markdown渲染完整内容
+                                                const finalContent = data.full_content || fullContent;
+                                                console.log('[DEBUG] 流式响应完成，总长度:', finalContent.length);
+                                                try {
+                                                    contentDiv.innerHTML = marked.parse(finalContent);
+                                                } catch (e) {
+                                                    console.error('Markdown渲染错误:', e);
+                                                    contentDiv.innerHTML = escapeHtml(finalContent);
+                                                }
+                                                // 重新加载对话以更新状态
+                                                await loadConversations();
+                                                renderChatConversationSelector();
+                                            } else if (data.content) {
+                                                // 追加内容（只有非空内容才追加）
+                                                fullContent += data.content;
+                                                console.log('[DEBUG] 更新内容，当前长度:', fullContent.length);
+                                                // 实时更新显示（使用Markdown渲染）
+                                                try {
+                                                    contentDiv.innerHTML = marked.parse(fullContent);
+                                                } catch (e) {
+                                                    contentDiv.textContent = fullContent;
+                                                }
+                                                container.scrollTop = container.scrollHeight;
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.error('[DEBUG] 解析SSE数据失败:', e, '数据:', dataStr);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (hasError) break;
+                    }
+                } catch (error) {
+                    console.error('[DEBUG] 读取流式响应失败:', error);
+                    if (!hasError) {
+                        contentDiv.innerHTML = `<div class="error-message">接收响应失败: ${escapeHtml(error.message)}</div>`;
+                        showError('接收响应失败: ' + error.message);
+                    }
+                }
+            } else {
+                // 非流式响应（回退方案）
+                console.log('[DEBUG] 非流式响应，使用JSON解析');
+                const data = await response.json();
+                const messageContent = data.message?.content || '';
+                if (messageContent) {
+                    try {
+                        contentDiv.innerHTML = marked.parse(messageContent);
+                    } catch (e) {
+                        contentDiv.innerHTML = escapeHtml(messageContent);
+                    }
+                    await loadConversations();
+                    renderChatConversationSelector();
+                }
+            }
         } else {
             loadingDiv.remove();
             const errorData = await response.json();
@@ -1413,11 +1850,11 @@ async function sendMessage() {
                 showError(errorMsg);
             }
         }
-            } catch (error) {
-                console.error('发送失败:', error);
-                loadingDiv.remove();
-                showError('⚠️ 发送失败，请检查网络连接。如果问题持续，请前往「设置」页面确认 API Key 已正确输入并保存。');
-            } finally {
+    } catch (error) {
+        console.error('发送失败:', error);
+        loadingDiv.remove();
+        showError('⚠️ 发送失败，请检查网络连接。如果问题持续，请前往「设置」页面确认 API Key 已正确输入并保存。');
+    } finally {
         input.disabled = false;
         sendBtn.disabled = false;
         sendBtn.textContent = '发送';

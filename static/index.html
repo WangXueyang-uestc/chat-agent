@@ -36,7 +36,7 @@
                     <li>
                         <a href="#page-chat" class="nav-item" data-page="chat">
                             <span class="nav-icon">💬</span>
-                            <span class="nav-text">对话与微调</span>
+                            <span class="nav-text">对话</span>
                         </a>
                     </li>
                     <li>
@@ -143,7 +143,7 @@
                 <!-- 页面3：对话与微调区域 -->
                 <div id="page-chat" class="page">
                     <div class="page-header">
-                        <h2>💬 对话与微调区域</h2>
+                        <h2>💬 对话</h2>
                         <p class="page-description">选择 Prompt 发送给大模型，并可以进行后续交流</p>
                     </div>
                     <div class="page-content">
@@ -157,7 +157,7 @@
 
                                 <div class="conversation-section">
                                     <h3>对话框列表</h3>
-                                    <select id="conversation-selector" class="select-input"></select>
+                                    <div id="conversation-list" class="conversation-list"></div>
                                     <input type="text" id="conversation-name" class="text-input" placeholder="对话框名称" style="margin-top: 10px;">
                                 </div>
 
@@ -173,7 +173,7 @@
                             <!-- 右侧：对话内容 -->
                             <div class="chat-right">
                                 <div class="content-section">
-                                    <h3>展示一开始输入的文本</h3>
+                                    <h3>预设的关键内容</h3>
                                     <textarea id="key-content-display" class="text-area" readonly></textarea>
                                 </div>
 
@@ -249,6 +249,7 @@
                                 <ul>
                                     <li><strong>DeepSeek:</strong> Base URL: https://api.deepseek.com/v1, Model: deepseek-chat, deepseek-reasoner, deepseek-r1</li>
                                     <li><strong>OpenAI:</strong> Base URL: https://api.openai.com/v1, Model: gpt-4, gpt-3.5-turbo, gpt-4-turbo</li>
+                                    <li><strong>元宝API:</strong> Base URL: 根据元宝API提供的地址配置, Model: 根据元宝API提供的模型名称配置（完全兼容 OpenAI API 格式）</li>
                                     <li><strong>其他兼容 OpenAI API 的服务:</strong> 使用对应的 Base URL 和 Model 名称</li>
                                 </ul>
                                 <h4>高级功能说明</h4>

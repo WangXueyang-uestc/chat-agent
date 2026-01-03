@@ -293,6 +293,46 @@ body.auth-page-active .main-content-wrapper {
     gap: 30px;
 }
 
+/* 对话列表样式 */
+.conversation-list {
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background: white;
+}
+
+.conversation-item {
+    padding: 12px 15px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background-color 0.2s;
+    font-size: 14px;
+    color: #555;
+}
+
+.conversation-item:last-child {
+    border-bottom: none;
+}
+
+.conversation-item:hover {
+    background-color: #f8f9fa;
+}
+
+.conversation-item.active {
+    background-color: #e7f3ff;
+    color: #667eea;
+    font-weight: 500;
+    border-left: 3px solid #667eea;
+}
+
+.conversation-empty {
+    padding: 20px;
+    text-align: center;
+    color: #999;
+    font-size: 14px;
+}
+
 /* 设置页面 */
 .settings-form {
     max-width: 800px;
